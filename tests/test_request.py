@@ -77,3 +77,14 @@ def test_host_allowlist():
     parse_job_input(payload(), (".example.com",))
     with pytest.raises(InputError, match="not allowed"):
         parse_job_input(payload(), (".blob.vercel-storage.com",))
+
+
+def test_host_allowlist_requires_a_dot_boundary():
+    ok = payload(references=[{"url": "https://a.b.example.com/1.png"}])
+    parse_job_input(ok, (".example.com",))
+    parse_job_input(ok, ("example.com",))
+    evil = payload(references=[{"url": "https://evilexample.com/1.png"}])
+    with pytest.raises(InputError, match="not allowed"):
+        parse_job_input(evil, (".example.com",))
+    with pytest.raises(InputError, match="not allowed"):
+        parse_job_input(evil, ("example.com",))

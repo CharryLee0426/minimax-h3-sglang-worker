@@ -55,7 +55,7 @@ One image serves many endpoints; each endpoint is configured with environment va
 | `HF_TOKEN` | unset | Only needed for gated/private repos |
 
 Pre-populate the volume on a cheap CPU pod instead of paying for GPU time:
-`pip install huggingface_hub hf_transfer && python -m h3worker.bootstrap` with the same env vars.
+`pip install huggingface_hub && python -m h3worker.bootstrap` with the same env vars.
 
 ## Development
 

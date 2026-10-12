@@ -3,7 +3,7 @@ FROM lmsysorg/sglang:v0.5.21-cu130
 
 ENV PYTHONUNBUFFERED=1 \
     HF_HOME=/runpod-volume/huggingface \
-    HF_HUB_ENABLE_HF_TRANSFER=1 \
+    HF_XET_HIGH_PERFORMANCE=1 \
     H3_MODEL_DIR=/runpod-volume/models/MiniMax-H3 \
     H3_LORA_DIR=/runpod-volume/loras
 

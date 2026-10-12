@@ -64,7 +64,7 @@ def ensure_model(
 
     from huggingface_hub import snapshot_download
 
-    os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")
+    os.environ.setdefault("HF_XET_HIGH_PERFORMANCE", "1")
     started = time.time()
     log(f"downloading {model_repo} ({PARTITIONS[variant]}/*) to {model_dir}")
     snapshot_download(

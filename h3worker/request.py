@@ -40,6 +40,12 @@ class JobSpec:
     output: OutputTarget
 
 
+def _host_matches(host: str, suffix: str) -> bool:
+    """True for the domain itself or any subdomain of it (dot-boundary match)."""
+    domain = suffix.strip().lstrip(".").lower()
+    return bool(domain) and (host == domain or host.endswith("." + domain))
+
+
 def _require_https(url: object, label: str, allowed_suffixes: tuple[str, ...] = ()) -> str:
     if not isinstance(url, str) or not url:
         raise InputError(f"{label} must be a non-empty string")
@@ -47,7 +53,7 @@ def _require_https(url: object, label: str, allowed_suffixes: tuple[str, ...] = 
     if parts.scheme != "https" or not parts.netloc:
         raise InputError(f"{label} must be an https URL")
     host = (parts.hostname or "").lower()
-    if allowed_suffixes and not any(host == s.lstrip(".") or host.endswith(s) for s in allowed_suffixes):
+    if allowed_suffixes and not any(_host_matches(host, s) for s in allowed_suffixes):
         raise InputError(f"{label} host {host!r} is not allowed")
     return url
 
