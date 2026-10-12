@@ -51,6 +51,13 @@ One image serves many endpoints; each endpoint is configured with environment va
 | `H3_MODEL_DIR` | `/runpod-volume/models/MiniMax-H3` | Where the `Ref2VA/` weights live (network volume) |
 | `H3_LORA_REPO`, `H3_LORA_FILE` | unset | Hugging Face repo and safetensors file of an optional LoRA |
 | `H3_LORA_SCALE` | `1.0` | LoRA strength |
+
+Kohya-style H3 LoRAs (`lora_unet_blocks_*` keys) are converted on start to the native key names SGLang v0.5.21 matches
+(`<file>.native.safetensors` next to the original). If a LoRA still applies to 0 layers the worker refuses to serve, so base-model
+output is never returned as LoRA output.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
 | `H3_LORA_MERGE_MODE` | `auto` | `auto`, `merge` or `dynamic` (SGLang `--lora-merge-mode`) |
 | `H3_NUM_GPUS` | autodetect | 1, 2, 4 or 8 |
 | `H3_ALLOWED_URL_SUFFIXES` | unset | Comma list (for example `.blob.vercel-storage.com`) restricting reference and upload hosts |
