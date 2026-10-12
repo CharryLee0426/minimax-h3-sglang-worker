@@ -61,6 +61,7 @@ output is never returned as LoRA output.
 | `H3_LORA_MERGE_MODE` | `auto` | `auto`, `merge` or `dynamic` (SGLang `--lora-merge-mode`) |
 | `H3_NUM_GPUS` | autodetect | 1, 2, 4 or 8 |
 | `H3_ALLOWED_URL_SUFFIXES` | unset | Comma list (for example `.blob.vercel-storage.com`) restricting reference and upload hosts |
+| `H3_IDLE_EXIT_S` | `150` | Exit the worker after this many seconds ready and idle (0 disables), so GPUs are released even if the platform leaves idle workers running |
 | `H3_EXTRA_ARGS` | unset | Extra `sglang serve` flags |
 | `H3_AUTO_DOWNLOAD` | `1` | Download missing weights on start; set `0` when the volume is pre-populated |
 | `HF_TOKEN` | unset | Only needed for gated/private repos |

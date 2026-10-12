@@ -53,6 +53,7 @@ class WorkerConfig:
     output_dir: str = "/tmp/h3-outputs"
     ready_timeout_s: int = 2400
     job_timeout_s: int = 3000
+    idle_exit_s: int = 150
     auto_download: bool = True
     extra_args: tuple[str, ...] = field(default_factory=tuple)
     lora_repo: str = ""
@@ -95,6 +96,7 @@ def load_config() -> WorkerConfig:
         output_dir=_env("H3_OUTPUT_DIR", WorkerConfig.output_dir),
         ready_timeout_s=_env_int("H3_READY_TIMEOUT_S", WorkerConfig.ready_timeout_s),
         job_timeout_s=_env_int("H3_JOB_TIMEOUT_S", WorkerConfig.job_timeout_s),
+        idle_exit_s=_env_int("H3_IDLE_EXIT_S", WorkerConfig.idle_exit_s),
         auto_download=_env("H3_AUTO_DOWNLOAD", "1") not in ("0", "false", "no"),
         extra_args=tuple(shlex.split(_env("H3_EXTRA_ARGS"))),
         lora_repo=_env("H3_LORA_REPO"),

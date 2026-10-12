@@ -5,7 +5,7 @@ import pytest
 
 from h3worker import pipeline
 from h3worker.config import WorkerConfig
-from h3worker.handler import ProgressReporter, make_handler
+from h3worker.handler import IdleWatchdog, ProgressReporter, make_handler
 from h3worker.pipeline import GenerationError, UploadError, run_job
 from h3worker.request import parse_job_input
 from tests.fakes import FakeSglang, FakeUploadTarget
@@ -213,3 +213,42 @@ class TestProgressReporter:
         report({"stage": "uploading", "elapsed_s": 18})   # same stage, 18s later -> sent
         report({"stage": "uploading", "elapsed_s": 19})   # too soon -> dropped
         assert [u["stage"] for u in sent] == ["generating", "uploading", "uploading"]
+
+
+class TestIdleWatchdog:
+    def make(self):
+        state = {"now": 0.0, "ready": False, "exits": []}
+        dog = IdleWatchdog(150, lambda: state["ready"], state["exits"].append, lambda: state["now"])
+        return dog, state
+
+    def test_never_exits_while_loading(self):
+        dog, s = self.make()
+        s["now"] = 10_000
+        assert dog.check() is False and s["exits"] == []
+
+    def test_exits_after_being_ready_and_idle_long_enough(self):
+        dog, s = self.make()
+        s["now"] = 1000; s["ready"] = False; dog.check()   # still loading: timer keeps resetting
+        s["ready"] = True
+        s["now"] = 1100; assert dog.check() is False
+        s["now"] = 1149; assert dog.check() is False
+        s["now"] = 1151; assert dog.check() is True
+        assert s["exits"] == [0]
+
+    def test_active_jobs_block_exit_and_restart_the_timer(self):
+        dog, s = self.make()
+        s["ready"] = True
+        dog.job_started()
+        s["now"] = 5000; assert dog.check() is False
+        dog.job_finished()
+        s["now"] = 5100; assert dog.check() is False
+        s["now"] = 5151; assert dog.check() is True
+
+    def test_handler_reports_jobs_to_the_watchdog(self, tmp_path):
+        dog, s = self.make()
+        s["ready"] = True
+        with FakeSglang(tmp_path) as sg:
+            cfg = WorkerConfig(port=int(sg.base_url.rsplit(":", 1)[1]), output_dir=str(tmp_path))
+            handler = make_handler(cfg, StubServer(), lambda job, update: None, watchdog=dog)
+            asyncio.run(handler({"id": "j", "input": {"prompt": ""}}))  # invalid input never counts as busy
+            assert dog._active == 0

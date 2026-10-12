@@ -54,11 +54,62 @@ class ProgressReporter:
         self._send(update)
 
 
+class IdleWatchdog:
+    """Exit the worker when it has been ready and idle too long, so the GPUs are released.
+
+    Runpod bills an idle worker until it scales down; if its autoscaler leaves idle workers running,
+    this bounds the cost of each one. Exiting while the model is still loading or a job is active never happens.
+    """
+
+    def __init__(
+        self,
+        idle_exit_s: float,
+        is_ready: Callable[[], bool],
+        exit_fn: Callable[[int], None] = os._exit,
+        clock: Callable[[], float] = time.monotonic,
+    ):
+        self.idle_exit_s = idle_exit_s
+        self._is_ready = is_ready
+        self._exit = exit_fn
+        self._clock = clock
+        self._active = 0
+        self._last = clock()
+        self._lock = threading.Lock()
+
+    def job_started(self) -> None:
+        with self._lock:
+            self._active += 1
+
+    def job_finished(self) -> None:
+        with self._lock:
+            self._active -= 1
+            self._last = self._clock()
+
+    def check(self) -> bool:
+        """Exit (and return True) if the worker is ready, has no job, and has been idle past the limit."""
+        with self._lock:
+            if self._active or not self._is_ready():
+                self._last = self._clock()  # the idle period starts once the worker is ready and free
+                return False
+            idle = self._clock() - self._last
+        if idle < self.idle_exit_s:
+            return False
+        print(f"[worker] idle for {idle:.0f}s; exiting to release the GPUs", flush=True)
+        self._exit(0)
+        return True
+
+    def run_forever(self, interval_s: float = 10.0) -> None:
+        while True:
+            time.sleep(interval_s)
+            self.check()
+
+
 def make_handler(
     cfg: WorkerConfig,
     server: SglangServer,
     send_progress: Callable[[dict, dict], None],
     exit_fn: Callable[[int], None] = os._exit,
+    watchdog: IdleWatchdog | None = None,
 ) -> Callable[[dict], "asyncio.Future[dict]"]:
     suffixes = allowed_host_suffixes()
 
@@ -68,6 +119,15 @@ def make_handler(
         except InputError as exc:
             return {"error": f"Invalid input: {exc}"}
 
+        if watchdog is not None:
+            watchdog.job_started()
+        try:
+            return await _process(job, spec, suffixes)
+        finally:
+            if watchdog is not None:
+                watchdog.job_finished()
+
+    async def _process(job: dict, spec, suffixes) -> dict:
         cancel = threading.Event()
         progress = ProgressReporter(lambda update: send_progress(job, update))
 
@@ -118,8 +178,11 @@ def main() -> None:
     cfg = load_config()
     server = SglangServer(cfg, prepare=lambda: prepare_weights(cfg))
     server.start()
+    watchdog = IdleWatchdog(cfg.idle_exit_s, lambda: server.ready)
+    if cfg.idle_exit_s > 0:
+        threading.Thread(target=watchdog.run_forever, name="idle-watchdog", daemon=True).start()
     runpod.serverless.start(
-        {"handler": make_handler(cfg, server, runpod.serverless.progress_update)}
+        {"handler": make_handler(cfg, server, runpod.serverless.progress_update, watchdog=watchdog)}
     )
 
 
