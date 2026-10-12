@@ -15,7 +15,11 @@ One image serves many endpoints; each endpoint is configured with environment va
 1. On start it downloads (once, to the network volume) the `Ref2VA/` partition of the model and the optional LoRA.
 2. It launches `sglang serve --model-variant ref2va` across all GPUs of the worker (`--ulysses-degree = #GPUs`; 1, 2, 4 or 8).
 3. For each job it submits a `ref2va` request, waits for the MP4, uploads it to a presigned `PUT` URL and returns metadata.
-   Progress is reported through Runpod's `progress_update` (`loading_model`, `submitting`, `generating`, `uploading`).
+   Progress is reported through Runpod's `progress_update` (`loading_model`, `submitting`, `generating`, `uploading`),
+   at most every 15 s per stage.
+4. Cancelling a job in Runpod stops the SGLang process and exits the worker, because SGLang cannot abort a generation;
+   Runpod starts a fresh worker for the next job (a cold start). A generation that exceeds `H3_JOB_TIMEOUT_S` (default 3000 s)
+   also recycles the worker.
 
 ## Job input
 

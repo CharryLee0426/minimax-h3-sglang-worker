@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import threading
 import time
 from typing import Callable
 
@@ -20,23 +21,38 @@ class GenerationError(RuntimeError):
     """SGLang rejected or failed the request."""
 
 
+class GenerationTimeout(GenerationError):
+    """The generation outlived its budget; SGLang may still be busy with it."""
+
+
+class JobCancelled(Exception):
+    """The job was cancelled while the worker was processing it."""
+
+
 class UploadError(RuntimeError):
     """The finished video could not be stored."""
 
 
 def _error_message(response: requests.Response) -> str:
     try:
-        detail = response.json().get("detail") or response.json()
+        body = response.json()
     except ValueError:
-        detail = response.text[:500]
-    return f"HTTP {response.status_code}: {detail}"
+        return f"HTTP {response.status_code}: {response.text[:500]}"
+    detail = body.get("detail") if isinstance(body, dict) else None
+    return f"HTTP {response.status_code}: {detail or body}"
 
 
-def submit(base_url: str, spec: JobSpec, session: requests.Session) -> str:
-    response = session.post(f"{base_url}/v1/videos", json=build_video_request(spec), timeout=60)
+def submit(base_url: str, spec: JobSpec, session: requests.Session) -> dict:
+    """Create the SGLang job. SGLang downloads the reference images before answering, so allow time."""
+    try:
+        response = session.post(
+            f"{base_url}/v1/videos", json=build_video_request(spec), timeout=(10, 300)
+        )
+    except requests.Timeout as exc:
+        raise GenerationError(f"SGLang did not accept the request in time: {exc}") from exc
     if response.status_code >= 400:
         raise GenerationError(f"SGLang rejected the request ({_error_message(response)})")
-    return response.json()["id"]
+    return response.json()
 
 
 def wait_for_video(
@@ -46,9 +62,12 @@ def wait_for_video(
     progress: Progress,
     timeout_s: float,
     poll_interval_s: float = POLL_INTERVAL_S,
+    cancel: threading.Event | None = None,
 ) -> dict:
     started = time.time()
     while True:
+        if cancel is not None and cancel.is_set():
+            raise JobCancelled()
         response = session.get(f"{base_url}/v1/videos/{video_id}", timeout=30)
         if response.status_code >= 400:
             raise GenerationError(f"status check failed ({_error_message(response)})")
@@ -61,7 +80,7 @@ def wait_for_video(
             raise GenerationError(f"generation failed: {message}")
         elapsed = time.time() - started
         if elapsed > timeout_s:
-            raise GenerationError(f"generation exceeded {timeout_s:.0f}s")
+            raise GenerationTimeout(f"generation exceeded {timeout_s:.0f}s")
         progress({"stage": "generating", "elapsed_s": round(elapsed)})
         time.sleep(poll_interval_s)
 
@@ -109,25 +128,27 @@ def run_job(
     job_timeout_s: float,
     session: requests.Session | None = None,
     poll_interval_s: float = POLL_INTERVAL_S,
+    cancel: threading.Event | None = None,
 ) -> dict:
     session = session or requests.Session()
     started = time.time()
     progress({"stage": "submitting"})
-    video_id = submit(base_url, spec, session)
+    created = submit(base_url, spec, session)
+    video_id = created["id"]
     local_path = os.path.join(output_dir, f"upload-{video_id}.mp4")
     meta: dict = {}
     size = 0
     generation_s = 0.0
     try:
         meta = wait_for_video(
-            base_url, video_id, session, progress, job_timeout_s, poll_interval_s
+            base_url, video_id, session, progress, job_timeout_s, poll_interval_s, cancel
         )
         generation_s = time.time() - started
         progress({"stage": "uploading"})
         size = download_video(base_url, video_id, local_path, session)
         upload_video(local_path, spec.output.put_url, spec.output.headers, session)
     finally:
-        _cleanup(local_path, meta, base_url, video_id, session)
+        _cleanup(local_path, created, meta, base_url, video_id, session)
     return {
         "video_key": spec.output.key,
         "size_bytes": size,
@@ -140,12 +161,16 @@ def run_job(
     }
 
 
-def _cleanup(local_path: str, meta: dict, base_url: str, video_id: str, session: requests.Session) -> None:
+def _cleanup(
+    local_path: str, created: dict, meta: dict, base_url: str, video_id: str, session: requests.Session
+) -> None:
     """Remove local files and the SGLang job record; never raises."""
-    paths = [local_path, *(meta.get("file_paths") or [])]
-    if meta.get("file_path"):
-        paths.append(meta["file_path"])
-    for path in paths:
+    paths = [local_path]
+    for source in (created, meta):
+        paths.extend(source.get("file_paths") or [])
+        if source.get("file_path"):
+            paths.append(source["file_path"])
+    for path in dict.fromkeys(paths):
         try:
             os.remove(path)
         except OSError:

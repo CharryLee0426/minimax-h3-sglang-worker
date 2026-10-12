@@ -9,8 +9,16 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Hold every package already in the image at its installed version so the Runpod SDK cannot replace
+# SGLang's pinned dependencies. If that is impossible, fall back to a plain install and let the
+# smoke test below decide whether the image still works.
+RUN pip list --format=freeze > /tmp/constraints.txt \
+ && (pip install --no-cache-dir -c /tmp/constraints.txt -r requirements.txt \
+     || (echo "constrained install failed; installing without constraints" \
+         && pip install --no-cache-dir -r requirements.txt)) \
+ && rm /tmp/constraints.txt
 COPY h3worker ./h3worker
+RUN python3 -c "import runpod, h3worker.handler" && sglang serve --help > /dev/null
 
 ENTRYPOINT []
 CMD ["python3", "-m", "h3worker.handler"]

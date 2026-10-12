@@ -58,7 +58,8 @@ class FakeSglang:
                 outer.requests.append(payload)
                 if outer.reject_with:
                     return self._send(400, json.dumps({"detail": outer.reject_with}).encode())
-                self._send(200, json.dumps({"id": "vid_1", "status": "queued"}).encode())
+                self._send(200, json.dumps({"id": "vid_1", "status": "queued",
+                                            "file_path": str(outer.video_path)}).encode())
 
             def do_DELETE(self):
                 outer.deleted.append(self.path.rsplit("/", 1)[1])

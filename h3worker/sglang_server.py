@@ -11,6 +11,7 @@ from typing import Callable
 import requests
 
 from .config import WorkerConfig, detect_gpu_count
+from .pipeline import JobCancelled
 
 
 def build_command(cfg: WorkerConfig, num_gpus: int, model_path: str) -> list[str]:
@@ -108,10 +109,17 @@ class SglangServer:
     def alive(self) -> bool:
         return self._proc is None or self._proc.poll() is None
 
-    def wait_ready(self, timeout: float, on_tick: Callable[[float], None] | None = None) -> None:
-        """Block until the server is healthy; raise if startup failed or timed out."""
+    def wait_ready(
+        self,
+        timeout: float,
+        on_tick: Callable[[float], None] | None = None,
+        cancel: threading.Event | None = None,
+    ) -> None:
+        """Block until the server is healthy; raise if startup failed, timed out or was cancelled."""
         started = time.time()
         while not self._ready.wait(timeout=5):
+            if cancel is not None and cancel.is_set():
+                raise JobCancelled()
             if self._error:
                 raise RuntimeError(self._error)
             if not self.alive():

@@ -1,10 +1,11 @@
+import asyncio
 import os
 
 import pytest
 
 from h3worker import pipeline
 from h3worker.config import WorkerConfig
-from h3worker.handler import make_handler
+from h3worker.handler import ProgressReporter, make_handler
 from h3worker.pipeline import GenerationError, UploadError, run_job
 from h3worker.request import parse_job_input
 from tests.fakes import FakeSglang, FakeUploadTarget
@@ -102,19 +103,28 @@ class StubServer:
     def __init__(self, error=None):
         self.error = error
         self.waited = 0
+        self.stopped = False
 
-    def wait_ready(self, timeout, on_tick=None):
+    def wait_ready(self, timeout, on_tick=None, cancel=None):
         self.waited += 1
         if self.error:
             raise RuntimeError(self.error)
         if on_tick:
             on_tick(12.0)
 
+    def stop(self):
+        self.stopped = True
 
-def make(tmp_path, sg, server):
+
+def make(tmp_path, sg, server, exit_fn=lambda code: None):
     cfg = WorkerConfig(port=int(sg.base_url.rsplit(":", 1)[1]), output_dir=str(tmp_path))
     sent = []
-    return make_handler(cfg, server, lambda job, update: sent.append(update)), sent
+    handler = make_handler(cfg, server, lambda job, update: sent.append(update), exit_fn)
+    return handler, sent
+
+
+def call(handler, job):
+    return asyncio.run(handler(job))
 
 
 def test_handler_happy_path_returns_output(tmp_path, monkeypatch):
@@ -126,7 +136,7 @@ def test_handler_happy_path_returns_output(tmp_path, monkeypatch):
         handler, sent = make(tmp_path, sg, StubServer())
         payload = spec_for(up, seed=1)
         payload["output"]["put_url"] = up.url
-        result = handler({"id": "job-1", "input": payload})
+        result = call(handler, {"id": "job-1", "input": payload})
     assert result["video_key"] == "videos/j1.mp4"
     assert {"stage": "loading_model", "elapsed_s": 12} in sent
 
@@ -134,12 +144,72 @@ def test_handler_happy_path_returns_output(tmp_path, monkeypatch):
 def test_handler_invalid_input_is_a_clean_error(tmp_path):
     with FakeSglang(tmp_path) as sg:
         handler, _ = make(tmp_path, sg, StubServer())
-        result = handler({"id": "job-2", "input": {"prompt": ""}})
+        result = call(handler, {"id": "job-2", "input": {"prompt": ""}})
     assert result == {"error": "Invalid input: prompt is required"}
 
 
 def test_handler_server_failure_recycles_worker(tmp_path):
     with FakeSglang(tmp_path) as sg, FakeUploadTarget() as up:
         handler, _ = make(tmp_path, sg, StubServer(error="CUDA error"))
-        result = handler({"id": "job-3", "input": spec_for(up)})
+        result = call(handler, {"id": "job-3", "input": spec_for(up)})
     assert "CUDA error" in result["error"] and result["refresh_worker"] is True
+
+
+def test_handler_generation_error_keeps_worker(tmp_path):
+    with FakeSglang(tmp_path, reject_with="bad aspect") as sg, FakeUploadTarget() as up:
+        handler, _ = make(tmp_path, sg, StubServer())
+        result = call(handler, {"id": "job-4", "input": spec_for(up)})
+    assert "bad aspect" in result["error"] and "refresh_worker" not in result
+
+
+def test_handler_generation_timeout_recycles_worker(tmp_path):
+    with FakeSglang(tmp_path, polls_until_done=10_000) as sg, FakeUploadTarget() as up:
+        cfg = WorkerConfig(port=int(sg.base_url.rsplit(":", 1)[1]), output_dir=str(tmp_path), job_timeout_s=0)
+        handler = make_handler(cfg, StubServer(), lambda job, update: None)
+        result = call(handler, {"id": "job-5", "input": spec_for(up)})
+    assert "exceeded" in result["error"] and result["refresh_worker"] is True
+
+
+def test_generation_failure_removes_sglang_output(tmp_path):
+    with FakeSglang(tmp_path, fail_with="boom") as sg, FakeUploadTarget() as up:
+        assert sg.video_path.exists()
+        with pytest.raises(GenerationError):
+            run_job(parse(up), base_url=sg.base_url, output_dir=str(tmp_path),
+                    progress=lambda _u: None, job_timeout_s=60)
+        assert not sg.video_path.exists()
+
+
+def test_cancelling_a_job_stops_sglang_and_recycles_the_worker(tmp_path):
+    exits = []
+    with FakeSglang(tmp_path, polls_until_done=10_000) as sg, FakeUploadTarget() as up:
+        server = StubServer()
+        handler, _ = make(tmp_path, sg, server, exit_fn=exits.append)
+
+        async def scenario():
+            task = asyncio.create_task(handler({"id": "job-6", "input": spec_for(up)}))
+            for _ in range(200):  # wait until SGLang has the request and the worker is polling
+                if sg.requests and sg.polls:
+                    break
+                await asyncio.sleep(0.05)
+            assert sg.requests, "job never reached SGLang"
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        asyncio.run(scenario())
+    assert server.stopped is True
+    assert exits == [0]
+
+
+class TestProgressReporter:
+    def test_sends_on_stage_change_and_throttles_repeats(self, monkeypatch):
+        sent = []
+        clock = iter([0.0, 1.0, 2.0, 20.0, 21.0])
+        monkeypatch.setattr("h3worker.handler.time.monotonic", lambda: next(clock))
+        report = ProgressReporter(sent.append, min_interval_s=15.0)
+        report({"stage": "generating", "elapsed_s": 0})   # first -> sent
+        report({"stage": "generating", "elapsed_s": 1})   # same stage, too soon -> dropped
+        report({"stage": "uploading"})                    # stage change -> sent
+        report({"stage": "uploading", "elapsed_s": 18})   # same stage, 18s later -> sent
+        report({"stage": "uploading", "elapsed_s": 19})   # too soon -> dropped
+        assert [u["stage"] for u in sent] == ["generating", "uploading", "uploading"]
